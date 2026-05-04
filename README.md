@@ -22,6 +22,12 @@ Personal pi coding agent configuration — skills, models, and preferences.
 | `supe-plan` | Breaks approved spec into bite-sized tasks with exact file paths and verification steps |
 | `supe-implement` | Orchestrates parallel workers (TDD discipline) → tests → dual-model review → merge/PR options |
 
+**Inspired by [obra/superpowers](https://github.com/obra/superpowers)** — a software development methodology that shapes agent behavior through rigid workflows. These skills are ported to pi's native tooling (subagents, taskplan, orchestration) rather than being a 1:1 copy.
+
+**Light vs Dark mode:**
+- **Light** — manual gates between phases. Each step waits for your approval before continuing. Good for complex, uncertain, or high-stakes work where you want to steer direction.
+- **Dark** — auto-flow from plan → implement → review with no human-in-the-loop until the final merge/PR decision. Good for well-understood tasks where you trust the process and want to minimize interruptions.
+
 ## Extensions Inventory
 
 | Extension | Link |
