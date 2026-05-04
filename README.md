@@ -11,6 +11,33 @@ Personal pi coding agent configuration — skills, models, and preferences.
 | `settings.json` | Pi preferences and installed packages |
 | `install.sh` | One-command symlink installer |
 
+## Skills Inventory
+
+| Skill | Description |
+|-------|-------------|
+| `go-ts-contract` | Validates API contract alignment between Go backend handlers and TypeScript frontend callers |
+| `migration-audit` | Audits "delete TS / create Go" migration PRs for behavioral regressions and lost side effects |
+| `pr-review` | Automated PR review pipeline — fetches diffs, analyzes for adverse findings, posts via `gh` |
+| `supe-design` | Design-first hard gate — explores requirements, produces approved spec before any code |
+| `supe-plan` | Breaks approved spec into bite-sized tasks with exact file paths and verification steps |
+| `supe-implement` | Orchestrates parallel workers (TDD discipline) → tests → dual-model review → merge/PR options |
+
+## Extensions Inventory
+
+| Extension | Link |
+|-----------|------|
+| `npm:pi-subagents` | [npmjs.com/package/pi-subagents](https://www.npmjs.com/package/pi-subagents) |
+| `npm:context-mode` | [npmjs.com/package/context-mode](https://www.npmjs.com/package/context-mode) |
+| `npm:@a5c-ai/babysitter-pi` | [npmjs.com/package/@a5c-ai/babysitter-pi](https://www.npmjs.com/package/@a5c-ai/babysitter-pi) |
+| `npm:taskplane` | [npmjs.com/package/taskplane](https://www.npmjs.com/package/taskplane) |
+| `npm:pi-web-access` | [npmjs.com/package/pi-web-access](https://www.npmjs.com/package/pi-web-access) |
+| `npm:pi-markdown-preview` | [npmjs.com/package/pi-markdown-preview](https://www.npmjs.com/package/pi-markdown-preview) |
+| `npm:@samfp/pi-memory` | [npmjs.com/package/@samfp/pi-memory](https://www.npmjs.com/package/@samfp/pi-memory) |
+| `npm:pi-lens` | [npmjs.com/package/pi-lens](https://www.npmjs.com/package/pi-lens) |
+| `npm:@juicesharp/rpiv-ask-user-question` | [npmjs.com/package/@juicesharp/rpiv-ask-user-question](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) |
+| `npm:@juicesharp/rpiv-advisor` | [npmjs.com/package/@juicesharp/rpiv-advisor](https://www.npmjs.com/package/@juicesharp/rpiv-advisor) |
+| `npm:@juicesharp/rpiv-btw` | [npmjs.com/package/@juicesharp/rpiv-btw](https://www.npmjs.com/package/@juicesharp/rpiv-btw) |
+
 ## Prerequisites
 
 This repo uses **environment variable references** for API keys. Before running pi, export:
