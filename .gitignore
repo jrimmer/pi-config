@@ -1,0 +1,19 @@
+# Secrets — never commit API keys or tokens
+auth.json
+
+# Explicitly block any file that might contain literal API keys
+# If you add new config files with secrets, reference them via env vars
+# e.g., "apiKey": "MY_API_KEY" not "apiKey": "sk-..."
+
+# Transient state
+sessions/
+run-history.jsonl
+
+# Staged tasks are project-specific, not global config
+taskplane/
+
+# Backups created by install script
+*.backup.*
+
+# macOS
+.DS_Store
