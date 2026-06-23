@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# Fetch all PR review feedback for a Forgejo/Gitea pull request and shape it
+# for the ce-resolve-pr-comments skill.
+#
+# Forgejo has no "resolve review thread" API (and no GraphQL). Instead of
+# GitHub's isResolved flag, this skill uses a 👍 (+1) reaction from the
+# authenticated user as the "addressed" marker. A comment is "addressed"
+# when it carries a +1 reaction from the token user.
+#
+# Output: a JSON object with four keys:
+#   review_comments   - inline code review comments across ALL reviews, each
+#                       carrying an `addressed` flag (👍 from token user).
+#                       Flat list; Forgejo groups conversations by
+#                       (path, line/position) across reviews, so a comment's
+#                       thread identity is (review_id, path, position).
+#   pr_comments       - top-level PR conversation comments (issue comments),
+#                       excluding the PR author and known CI/status bots.
+#   review_bodies     - review submissions with non-empty body text (excl. PR
+#                       author + CI bots). These have no thread/reaction marker
+#                       in Forgejo's model, so `addressed` is always false and
+#                       they reappear every run (handled by SKILL.md triage).
+#   cross_invocation  - envelope for cluster analysis:
+#     signal: true when both addressed and unaddressed inline comments exist
+#     addressed_comments: last 10 addressed inline comments by recency
+#
+# Usage:
+#   get-pr-comments [PR_NUMBER] [OWNER/REPO]
+#   get-pr-comments            # detect PR from current branch
+#   get-pr-comments 31
+#   get-pr-comments 31 jrimmer/netcrawl
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+# CI/status bots whose output is structurally never actionable — filtered at
+# the source (same policy as the GitHub ce-resolve-pr-feedback skill). AI
+# review bots (forgejo-actions, coderabbitai, etc.) are NOT filtered here;
+# SKILL.md triage does a content-aware actionability check on those.
+CI_BOTS = {"codecov"}
+
+# Reaction content that marks a comment "addressed". Forgejo uses "+1" for 👍.
+ADDRESSED_REACTION = "+1"
+
+
+def die(msg, code=1):
+    sys.stderr.write(f"get-pr-comments: {msg}\n")
+    sys.exit(code)
+
+
+def fj_json(*args, full=True):
+    """Run a fj command and return parsed JSON (unwrapped from {meta,results})."""
+    flags = ["--json", "--no-input", "--no-color", "--yes"] if full else ["--agent"]
+    cmd = ["fj", *args, *flags]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"fj {' '.join(args)} failed ({r.returncode}): {r.stderr.strip()[:400]}")
+    if not r.stdout.strip():
+        return None
+    try:
+        d = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        # fj sometimes emits a stderr-warning line on stdout when merged; we
+        # kept stderr separate so this shouldn't happen, but be defensive.
+        die(f"fj {' '.join(args)} returned non-JSON: {r.stdout[:200]}")
+    if isinstance(d, dict) and "results" in d:
+        return d["results"]
+    return d
+
+
+def derive_owner_repo():
+    """Derive OWNER/REPO from the git remote (origin, then github)."""
+    for remote in ("origin", "github"):
+        r = subprocess.run(["git", "remote", "get-url", remote],
+                           capture_output=True, text=True)
+        url = r.stdout.strip()
+        if not url:
+            continue
+        url = re.sub(r"^https?://[^@/]*@", "", url)   # strip user:pass@
+        url = re.sub(r"^https?://", "", url)
+        url = re.sub(r"^git@", "", url).replace(":", "/", 1)
+        m = re.search(r"([^/]+)/([^/]+?)(?:\.git)?$", url)
+        if m:
+            return m.group(1), m.group(2)
+    return None, None
+
+
+def current_branch():
+    r = subprocess.run(["git", "branch", "--show-current"],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def detect_pr(owner, repo):
+    """Find the open PR whose head branch matches the current git branch."""
+    branch = current_branch()
+    if not branch:
+        return None
+    prs = fj_json("repos", "pulls", "repo-list-requests", owner, repo) or []
+    for p in prs:
+        if (p.get("head") or {}).get("ref") == branch:
+            return p.get("number")
+    return None
+
+
+def token_user_login():
+    u = fj_json("user", "get-current") or {}
+    return u.get("login")
+
+
+def comment_is_addressed(owner, repo, comment_id, me):
+    """True if comment_id has a +1 reaction from the token user."""
+    reactions = fj_json("repos", "issues", "get-comment-reactions",
+                        owner, repo, str(comment_id)) or []
+    for rx in reactions:
+        if rx.get("content") == ADDRESSED_REACTION and \
+                (rx.get("user") or {}).get("login") == me:
+            return True
+    return False
+
+
+def main():
+    pr_number = sys.argv[1] if len(sys.argv) > 1 else None
+    owner_repo = sys.argv[2] if len(sys.argv) > 2 else None
+
+    if owner_repo:
+        parts = owner_repo.split("/")
+        if len(parts) != 2:
+            die("OWNER/REPO must be 'owner/repo'")
+        owner, repo = parts
+    else:
+        owner, repo = derive_owner_repo()
+        if not owner:
+            die("Could not detect repository. Pass OWNER/REPO as second arg.")
+
+    if pr_number is None:
+        pr_number = detect_pr(owner, repo)
+        if pr_number is None:
+            die("Could not detect PR from current branch. Pass PR number as "
+                "first arg.")
+
+    me = token_user_login()
+    if not me:
+        die("Could not determine authenticated user (fj user get-current).")
+
+    pr = fj_json("repos", "pulls", "repo-get-request", owner, repo, str(pr_number)) or {}
+    pr_author = (pr.get("user") or {}).get("login")
+
+    # --- inline review comments across all reviews ---
+    reviews = fj_json("repos", "pulls", "repo-list-reviews", owner, repo, str(pr_number)) or []
+    review_comments = []
+    review_bodies = []
+    for rv in reviews:
+        rid = rv.get("id")
+        author = (rv.get("user") or {}).get("login")
+        body = rv.get("body") or ""
+        # review body (non-empty, not PR author, not CI bot)
+        if body.strip() and author != pr_author and author not in CI_BOTS:
+            review_bodies.append({
+                "review_id": rid,
+                "body": body,
+                "author": author,
+                "state": rv.get("state"),
+                "addressed": False,  # no reaction marker on review bodies
+            })
+        # inline comments for this review
+        comments = fj_json("repos", "pulls", "repo-get-review-comments",
+                           owner, repo, str(pr_number), str(rid)) or []
+        for c in comments:
+            cid = c.get("id")
+            cauthor = (c.get("user") or {}).get("login")
+            addressed = comment_is_addressed(owner, repo, cid, me) if cid else False
+            review_comments.append({
+                "id": cid,
+                "review_id": rid,
+                "path": c.get("path"),
+                "position": c.get("position"),
+                "original_position": c.get("original_position"),
+                "diff_hunk": c.get("diff_hunk"),
+                "body": c.get("body") or "",
+                "author": cauthor,
+                "is_pr_author": cauthor == pr_author,
+                "created_at": c.get("created_at"),
+                "html_url": c.get("html_url"),
+                "resolver": c.get("resolver"),  # populated by UI resolve, if any
+                "addressed": addressed,
+            })
+
+    # --- top-level PR conversation comments (issue comments) ---
+    issue_comments = fj_json("repos", "issues", "get-comments",
+                             owner, repo, str(pr_number)) or []
+    pr_comments = []
+    for c in issue_comments:
+        cid = c.get("id")
+        cauthor = (c.get("user") or {}).get("login")
+        body = c.get("body") or ""
+        if not body.strip():
+            continue
+        if cauthor == pr_author or cauthor in CI_BOTS:
+            continue
+        addressed = comment_is_addressed(owner, repo, cid, me) if cid else False
+        pr_comments.append({
+            "id": cid,
+            "body": body,
+            "author": cauthor,
+            "created_at": c.get("created_at"),
+            "html_url": c.get("html_url"),
+            "addressed": addressed,
+        })
+
+    # --- cross-invocation envelope (for cluster analysis) ---
+    unaddressed_inline = [c for c in review_comments if not c["addressed"]]
+    addressed_inline = [c for c in review_comments if c["addressed"]]
+    addressed_inline_sorted = sorted(
+        addressed_inline, key=lambda c: c.get("created_at") or "", reverse=True
+    )[:10]
+    addressed_brief = [
+        {
+            "comment_id": c["id"],
+            "path": c.get("path"),
+            "line": c.get("position"),
+            "first_comment_body": c.get("body"),
+            "created_at": c.get("created_at"),
+        }
+        for c in addressed_inline_sorted
+    ]
+
+    out = {
+        "pr_number": pr_number,
+        "owner": owner,
+        "repo": repo,
+        "pr_author": pr_author,
+        "token_user": me,
+        "review_comments": review_comments,
+        "pr_comments": pr_comments,
+        "review_bodies": review_bodies,
+        "cross_invocation": {
+            "signal": len(addressed_inline) > 0 and len(unaddressed_inline) > 0,
+            "addressed_comments": addressed_brief,
+        },
+    }
+    json.dump(out, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

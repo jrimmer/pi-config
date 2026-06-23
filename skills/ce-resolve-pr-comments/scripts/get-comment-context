@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+# For targeted mode: given a comment id (the REST id from a PR comment URL),
+# return the inline review comment it belongs to (its review id, path,
+# position, body, and addressed state). Forgejo has no "thread" abstraction
+# like GitHub's reviewThreads; a conversation is the set of review comments
+# sharing (path, line/position). This script finds the single comment so the
+# resolver agent can reply at the same path+position.
+#
+# Usage: get-comment-context OWNER REPO PR_NUMBER COMMENT_ID
+
+set -e
+
+if [ $# -lt 4 ]; then
+    echo "Usage: get-comment-context OWNER REPO PR_NUMBER COMMENT_ID" >&2
+    exit 1
+fi
+
+OWNER=$1; REPO=$2; PR=$3; CID=$4
+
+me=$(fj user get-current --json --no-input --no-color 2>/dev/null \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); u=d.get('results',d); print(u.get('login',''))" 2>/dev/null || true)
+
+# The comment id may be an inline review comment or a top-level issue comment.
+# Try issue-comments first (cheap, single endpoint), then fall back to scanning
+# review comments across all reviews.
+
+# 1. top-level issue comment?
+issue=$(fj repos issues get-comments "$OWNER" "$REPO" "$PR" \
+    --json --no-input --no-color 2>/dev/null || true)
+
+match=$(echo "$issue" | python3 -c "
+import json,sys
+cid=$CID
+d=json.load(sys.stdin)
+cs=d.get('results',d) if isinstance(d,dict) else d
+for c in (cs or []):
+    if c.get('id')==cid:
+        print(json.dumps({'type':'pr_comment','id':cid,'body':c.get('body'),
+            'author':(c.get('user') or {}).get('login'),
+            'html_url':c.get('html_url')}))
+        break
+" 2>/dev/null || true)
+
+if [ -n "$match" ]; then
+    echo "$match"
+    exit 0
+fi
+
+# 2. inline review comment: scan reviews
+reviews=$(fj repos pulls repo-list-reviews "$OWNER" "$REPO" "$PR" \
+    --json --no-input --no-color 2>/dev/null || true)
+
+echo "$reviews" | python3 -c "
+import json,sys
+cid=$CID
+me='$me'
+d=json.load(sys.stdin)
+rvs=d.get('results',d) if isinstance(d,dict) else d
+# we need per-review comments; print review ids for the shell to fan out
+print(json.dumps([r.get('id') for r in (rvs or [])]))
+" 2>/dev/null > /tmp/_rv_ids.json
+
+rids=$(cat /tmp/_rv_ids.json)
+for rid in $(echo "$rids" | python3 -c "import json,sys; print(' '.join(str(x) for x in json.load(sys.stdin)))"); do
+    fj repos pulls repo-get-review-comments "$OWNER" "$REPO" "$PR" "$rid" \
+        --json --no-input --no-color 2>/dev/null | python3 -c "
+import json,sys
+cid=$CID; rid=$rid; me='$me'
+d=json.load(sys.stdin)
+cs=d.get('results',d) if isinstance(d,dict) else d
+for c in (cs or []):
+    if c.get('id')==cid:
+        # check addressed (+1 from me)
+        print(json.dumps({'type':'review_comment','id':cid,'review_id':rid,
+            'path':c.get('path'),'position':c.get('position'),
+            'original_position':c.get('original_position'),
+            'body':c.get('body'),'author':(c.get('user') or {}).get('login'),
+            'html_url':c.get('html_url'),'resolver':c.get('resolver')}))
+        break
+" 2>/dev/null && exit 0
+done
+
+echo "Error: comment $CID not found on PR $PR" >&2
+exit 1

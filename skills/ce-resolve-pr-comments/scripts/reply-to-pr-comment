@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+# Reply to a PR review comment on Forgejo/Gitea.
+#
+# Inline review comments  -> a new comment on the SAME review at the same
+#                            path + position (threads the conversation in the
+#                            Forgejo UI). Requires REVIEW_ID, PATH, POSITION.
+# Top-level PR comments   -> a top-level issue comment (no inline context).
+#                            Omit REVIEW_ID/PATH/POSITION.
+#
+# Body is read from stdin to avoid shell escaping issues with markdown.
+#
+# Usage (inline):
+#   echo 'reply body' | reply-to-pr-comment OWNER REPO PR_NUMBER REVIEW_ID PATH POSITION
+# Usage (top-level):
+#   echo 'reply body' | reply-to-pr-comment OWNER REPO PR_NUMBER
+
+set -e
+
+if [ $# -lt 3 ]; then
+    echo "Usage: reply-to-pr-comment OWNER REPO PR_NUMBER [REVIEW_ID PATH POSITION]" >&2
+    echo "  inline:     echo 'body' | reply-to-pr-comment OWNER REPO PR REVIEW_ID PATH POSITION" >&2
+    echo "  top-level:  echo 'body' | reply-to-pr-comment OWNER REPO PR" >&2
+    exit 1
+fi
+
+OWNER=$1; REPO=$2; PR=$3
+BODY=$(cat)
+
+if [ -z "$BODY" ]; then
+    echo "Error: No body provided on stdin." >&2
+    exit 1
+fi
+
+if [ $# -ge 6 ]; then
+    # Inline reply: add a comment to the existing review at the same path+line.
+    REVIEW_ID=$4; PATH_=$5; POSITION=$6
+    fj repos pulls repo-create-review-comment "$OWNER" "$REPO" "$PR" "$REVIEW_ID" \
+        --body "$BODY" --path "$PATH_" --new-position "$POSITION" \
+        --json --no-input --no-color --yes
+else
+    # Top-level reply: a PR conversation (issue) comment.
+    fj repos issues create-comment "$OWNER" "$REPO" "$PR" \
+        --body "$BODY" \
+        --json --no-input --no-color --yes
+fi

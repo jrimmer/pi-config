@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+# Mark a PR review comment "addressed" by posting a 👍 (+1) reaction from the
+# authenticated user. Forgejo/Gitea has no public "resolve review thread" API
+# on current versions, so the +1 reaction is this skill's lightweight,
+# UI-visible "addressed" marker. It is also what get-pr-comments checks on
+# re-runs to skip already-handled comments.
+#
+# Works on BOTH inline review comments and top-level PR comments: Forgejo
+# stores them in a unified comment table, so the /issues/comments/{id}/reactions
+# endpoint accepts any comment id.
+#
+# Usage: mark-comment-addressed OWNER REPO COMMENT_ID
+
+set -e
+
+if [ $# -lt 3 ]; then
+    echo "Usage: mark-comment-addressed OWNER REPO COMMENT_ID" >&2
+    exit 1
+fi
+
+OWNER=$1; REPO=$2; CID=$3
+
+# Idempotent: Forgejo toggles reactions, so posting +1 twice would REMOVE it.
+# Guard by checking for an existing +1 from the token user first.
+existing=$(fj repos issues get-comment-reactions "$OWNER" "$REPO" "$CID" \
+    --json --no-input --no-color 2>/dev/null || true)
+
+me=$(fj user get-current --json --no-input --no-color 2>/dev/null \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); u=d.get('results',d); print(u.get('login',''))" 2>/dev/null || true)
+
+if echo "$existing" | python3 -c "
+import json,sys
+me='$me'
+d=json.load(sys.stdin)
+rs=d.get('results',d) if isinstance(d,dict) else d
+for r in (rs or []):
+    if r.get('content')=='+1' and (r.get('user') or {}).get('login')==me:
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null; then
+    echo "already addressed (+1 from $me on comment $CID)"
+    exit 0
+fi
+
+fj repos issues post-comment-reaction "$OWNER" "$REPO" "$CID" \
+    --content "+1" --json --no-input --no-color --yes
